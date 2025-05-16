@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+
+import sys
+import time
+from easysnmp import Session
+
+def parse_arguments():
+    if len(sys.argv) < 5:
+        print("Usage: prober.txt <ip:port:community> <frequency> <samples> <oid1> <oid2> ...")
+        sys.exit(1)
+
+    target_info = sys.argv[1].split(':')
+    if len(target_info) != 3:
+        print("Target format should be <ip:port:community>")
+        sys.exit(1)
+
+    ip, port, community = target_info
+    frequency = float(sys.argv[2])
+    interval = 1 / frequency
+    samples = int(sys.argv[3])
+    oids = ['1.3.6.1.2.1.1.3.0'] + sys.argv[4:]  # Include sysUpTime
+
+    return ip, port, community, interval, samples, oids
+
+def main():
+    ip, port, community, interval, samples, oids = parse_arguments()
+    session = Session(
+        hostname=ip,
+        remote_port=int(port),
+        community=community,
+        version=2,
+        timeout=1,
+        retries=1
+    )
+
+    previous_values = [0] * len(oids)
+    previous_uptime = 0
+    timedelay = time.time()
+
+    iteration = 0
+    initialized = False  # Skip first iteration for initialization
+
+    while samples == -1 or iteration < samples:
+        # Passive timing loop
+        if time.time() - timedelay < interval:
+            while interval > time.time() - timedelay:
+                pass
+        else: 
+            multiple_int = int((time.time() - timedelay) / interval)
+            while (multiple_int + 1) * interval > time.time() - timedelay:
+                pass
+        timedelay = time.time()
+        response = session.get(oids)
+        
+        try:
+            values = [int(r.value) if r.value != 'NOSUCHINSTANCE' else 0 for r in response]
+            uptime = values[0]
+            delta_time = (uptime - previous_uptime) / 100 if previous_uptime else 1
+            if not initialized:
+                # First poll, just initialize
+                previous_values = values
+                previous_uptime = uptime
+                initialized = True
+                continue
+
+            if delta_time <= 0:
+                print("Agent has RESET")
+                previous_values = values
+                previous_uptime = uptime
+                continue
+
+            output = [f"{time.time():.2f}"]
+            for i in range(1, len(values)):
+                diff = values[i] - previous_values[i]
+
+                if diff <= 0:
+                    if response[i].snmp_type == 'COUNTER64':
+                        rate = int((diff + 2**64) / delta_time)
+                    elif response[i].snmp_type == 'COUNTER32' or 'COUNTER':
+                        rate = int((diff + 2**32) / delta_time)
+                else:
+                    rate = int(diff / delta_time)
+
+                output.append(str(rate))
+
+            print(" | ".join(output))
+
+            previous_values = values
+            previous_uptime = uptime
+            iteration += 1
+
+        except Exception as e:
+            print(f"Error: {e}")
+
+if __name__ == "__main__":
+    main()
